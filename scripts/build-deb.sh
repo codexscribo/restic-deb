@@ -51,7 +51,10 @@ deb_version="${version_number}-${package_revision}"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 dist_dir="$repo_root/dist"
 work_dir="$(mktemp -d)"
-trap 'rm -rf "$work_dir"' EXIT
+cleanup() {
+  rm -rf "$work_dir" 2>/dev/null || true
+}
+trap cleanup EXIT
 
 asset="restic_${version_number}_linux_${arch}.bz2"
 url="https://github.com/restic/restic/releases/download/${version}/${asset}"
@@ -160,6 +163,12 @@ sed -i "s/__INSTALLED_SIZE__/${installed_size}/g" "$PKGROOT/DEBIAN/control"
 
 echo "Building ${OUT_DEB}"
 dpkg-deb --root-owner-group --build "$PKGROOT" "$OUT_DEB"
+
+# Clean up container-created root files so host user can remove work_dir
+rm -rf "$PKGROOT"
+if [[ -n "${HOST_UID:-}" && -n "${HOST_GID:-}" ]]; then
+  chown -R "${HOST_UID}:${HOST_GID}" /work
+fi
 EOS
 
 echo "Detecting dependencies and building package inside ${build_image}"
@@ -167,6 +176,8 @@ docker run --rm --platform "linux/${arch}" \
   -e "PKGROOT=${pkgroot_container}" \
   -e "EXTRA_PACKAGES=${extra_packages[*]:-}" \
   -e "OUT_DEB=/work/${deb_name}" \
+  -e "HOST_UID=$(id -u)" \
+  -e "HOST_GID=$(id -g)" \
   -v "$work_dir:/work" \
   "$build_image" bash /work/container-build.sh
 

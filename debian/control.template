@@ -1,0 +1,15 @@
+Package: restic
+Version: __VERSION__
+Section: utils
+Priority: optional
+Architecture: __ARCH__
+__DEPENDS__
+Recommends: ca-certificates
+Suggests: fuse3 | fuse
+Installed-Size: __INSTALLED_SIZE__
+Maintainer: Fernando Silveira <fsilveira@gmail.com>
+Homepage: https://restic.net
+Description: fast, secure, efficient backup program (upstream prebuilt release)
+ Unofficial repackaging of the official Restic prebuilt release binary
+ (see https://github.com/restic/restic/releases) as a .deb, not affiliated
+ with or endorsed by the Restic project.

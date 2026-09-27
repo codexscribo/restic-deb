@@ -1,0 +1,168 @@
+name: Build and release Restic .deb packages
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Restic tag to build (e.g. v0.19.1). Leave empty to use the latest release.'
+        required: false
+      package_revision:
+        description: 'Package revision to publish (Debian "debian_revision" convention). Leave empty to auto-pick the next revision. Set this to re-publish a version after a packaging-only fix, without waiting for a new upstream Restic release.'
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  determine-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      release_exists: ${{ steps.check.outputs.exists }}
+      package_revision: ${{ steps.revision.outputs.revision }}
+      release_tag: ${{ steps.revision.outputs.tag }}
+    steps:
+      - name: Determine target version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            tag="$(curl -fsSL https://api.github.com/repos/restic/restic/releases/latest | jq -r .tag_name)"
+            echo "version=$tag" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Only the scheduled run auto-skips already-published versions: its job
+      # is just to notice new upstream Restic releases. A manual dispatch is
+      # always an explicit request to publish, so it proceeds even when a
+      # release for this version already exists -- that's how you publish a
+      # packaging-only fix under a bumped package_revision without waiting
+      # for a new upstream version.
+      - name: Check whether this version already has a release
+        id: check
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if gh release list --repo "${{ github.repository }}" --limit 500 --json tagName \
+               --jq '.[].tagName' \
+               | grep -qE "^${VERSION//./\\.}(-[0-9]+)?\$"; then
+            echo "A release for $VERSION already exists, nothing to do."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Determine package revision
+        id: revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          INPUT_REVISION: ${{ github.event.inputs.package_revision }}
+        run: |
+          if [ -n "$INPUT_REVISION" ]; then
+            revision="$INPUT_REVISION"
+          else
+            max=0
+            while IFS= read -r tag; do
+              [ -z "$tag" ] && continue
+              if [ "$tag" = "$VERSION" ]; then
+                rev=1
+              elif [[ "$tag" =~ ^${VERSION//./\\.}-([0-9]+)$ ]]; then
+                rev="${BASH_REMATCH[1]}"
+              else
+                continue
+              fi
+              if [ "$rev" -gt "$max" ]; then
+                max="$rev"
+              fi
+            done < <(gh release list --repo "${{ github.repository }}" --limit 500 --json tagName --jq '.[].tagName')
+            revision=$((max + 1))
+          fi
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+          echo "tag=${VERSION}-${revision}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: determine-version
+    if: needs.determine-version.outputs.release_exists != 'true'
+    # The arm64 leg runs on a native arm64 runner for optimal speed and reliability.
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build .deb
+        run: scripts/build-deb.sh "${{ needs.determine-version.outputs.version }}" "${{ matrix.arch }}" "${{ needs.determine-version.outputs.package_revision }}"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: restic-deb-${{ matrix.arch }}
+          path: dist/*.deb
+
+  test:
+    needs: [determine-version, build]
+    if: needs.determine-version.outputs.release_exists != 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+        image:
+          - ubuntu:22.04
+          - ubuntu:24.04
+          - ubuntu:26.04
+          - debian:12
+          - debian:13
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: restic-deb-${{ matrix.arch }}
+          path: dist
+
+      - uses: docker/setup-qemu-action@v4
+
+      - name: Install, smoke-test, and uninstall inside ${{ matrix.image }}
+        env:
+          VERSION: ${{ needs.determine-version.outputs.version }}
+          PACKAGE_REVISION: ${{ needs.determine-version.outputs.package_revision }}
+        run: |
+          version_number="${VERSION#v}"
+          deb_version="${version_number}-${PACKAGE_REVISION}"
+          docker run --rm --platform "linux/${{ matrix.arch }}" \
+            -v "$PWD:/w" -w /w "${{ matrix.image }}" \
+            ./scripts/test-deb.sh "./dist/restic_${deb_version}_${{ matrix.arch }}.deb" "$version_number"
+
+  release:
+    needs: [determine-version, build, test]
+    if: needs.determine-version.outputs.release_exists != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: restic-deb-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.determine-version.outputs.version }}
+          PACKAGE_REVISION: ${{ needs.determine-version.outputs.package_revision }}
+          RELEASE_TAG: ${{ needs.determine-version.outputs.release_tag }}
+        run: |
+          gh release create "$RELEASE_TAG" dist/*.deb \
+            --title "Restic $VERSION (.deb packages, packaging r$PACKAGE_REVISION)" \
+            --notes "Unofficial repackaging of the official Restic prebuilt release binaries as .deb packages for Ubuntu/Debian. Not affiliated with or endorsed by the Restic project.
+
+          Package revision: $PACKAGE_REVISION
+
+          Upstream release notes: https://github.com/restic/restic/releases/tag/$VERSION"

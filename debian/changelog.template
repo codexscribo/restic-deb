@@ -1,0 +1,6 @@
+restic (__VERSION__) unstable; urgency=medium
+
+  * Repackage of upstream Restic __UPSTREAM_TAG__ prebuilt release binary
+    (__ARCH__) from https://github.com/restic/restic/releases.
+
+ -- Fernando Silveira <fsilveira@gmail.com>  __DATE__

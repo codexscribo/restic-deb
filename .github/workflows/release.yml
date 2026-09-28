@@ -26,11 +26,13 @@ jobs:
     steps:
       - name: Determine target version
         id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           if [ -n "${{ github.event.inputs.version }}" ]; then
             echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
           else
-            tag="$(curl -fsSL https://api.github.com/repos/restic/restic/releases/latest | jq -r .tag_name)"
+            tag="$(gh api repos/restic/restic/releases/latest --jq .tag_name)"
             echo "version=$tag" >> "$GITHUB_OUTPUT"
           fi
 
